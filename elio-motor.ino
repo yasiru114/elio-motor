@@ -640,6 +640,15 @@ void setup() {
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
 
+  Serial.print("Connected SSID: ");
+Serial.println(WiFi.SSID());
+
+Serial.print("MQTT Server: ");
+Serial.println(mqtt_server);
+
+Serial.print("Gateway: ");
+Serial.println(WiFi.gatewayIP());
+
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
 
