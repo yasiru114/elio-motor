@@ -1,10 +1,13 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <PubSubClient.h>
+#include <ESPmDNS.h>
 
 // ================= WIFI =================
 const char* ssid = "Vismi";
 const char* password = "111111111";
+
+String lastPublishedStatus = "";
 
 // ================= MQTT =================
 // MQTT broker runs on Raspberry Pi
@@ -639,6 +642,12 @@ void setup() {
   Serial.println("WiFi Connected!");
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
+
+  if (MDNS.begin("luna-motor-esp32")) {
+  Serial.println("mDNS started: luna-motor-esp32.local");
+} else {
+  Serial.println("mDNS failed");
+}
 
   Serial.print("Connected SSID: ");
 Serial.println(WiFi.SSID());
