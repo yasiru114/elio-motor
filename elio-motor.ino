@@ -99,6 +99,9 @@ void publishStatus(String statusText) {
   json += "\"dance\":" + String(danceMode);
   json += "}";
 
+  if (json == lastPublishedStatus) return;
+
+  lastPublishedStatus = json;
   mqttClient.publish(TOPIC_ROBOT_STATUS, json.c_str(), true);
 }
 
