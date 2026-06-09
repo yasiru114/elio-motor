@@ -689,7 +689,7 @@ void loop() {
 
   unsigned long now = millis();
 
-  if (now - lastMqttSensorPublish > 500) {
+   if (now - lastMqttSensorPublish > 15000) {
     lastMqttSensorPublish = now;
     publishSensors();
   }
