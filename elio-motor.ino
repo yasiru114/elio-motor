@@ -11,7 +11,7 @@ String lastPublishedStatus = "";
 // ================= MQTT =================
 // MQTT broker runs on Raspberry Pi
 // If raspberrypi.local does not work, replace with Pi IP, example: "10.140.180.xxx"
-const char* mqtt_server = "raspberrypi.local";
+const char* mqtt_server = "10.234.202.209";
 const int mqtt_port = 1883;
 
 bool danceStatusPublished = false;
@@ -262,7 +262,7 @@ void runDanceMode() {
     else if (danceMode == 2) sensorStatus = "DANCE 2 - MEDIUM";
     else if (danceMode == 3) sensorStatus = "DANCE 3 - FAST";
 
-    //publishStatus(sensorStatus);
+    // Do not publish every dance step. DANCE command already publishes start/stop.
     danceStatusPublished = true;
   }
 
@@ -301,30 +301,20 @@ void handleMqttCommand(String cmd) {
   Serial.print("MQTT CMD: ");
   Serial.println(cmd);
 
-if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
-
-    // Do not allow Pi face commands to stop/override Dance Mode
-    if (danceMode != 0) {
-      sensorStatus = "IGNORED FACE CMD - DANCE MODE";
-      return;
-    }
-
-    // Do not allow Pi face commands to override Manual Mode
-    if (controlMode == 2) {
-      sensorStatus = "IGNORED FACE CMD - MANUAL MODE";
-      return;
-    }
-
+  if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
     piCommand = cmd;
     lastPiCommandTime = millis();
     controlMode = 1;
+    danceMode = 0;
 
     if (cmd == "STOP") faceStatus = "NO FACE";
     else faceStatus = "FACE DETECTED";
 
     sensorStatus = "MQTT PI COMMAND: " + cmd;
+    publishStatus(sensorStatus);
     return;
   }
+
   if (cmd.startsWith("MODE:")) {
     int mode = cmd.substring(5).toInt();
 
@@ -338,7 +328,7 @@ if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd 
       if (controlMode == 1) sensorStatus = "FACE FOLLOW MODE";
       else if (controlMode == 2) sensorStatus = "MANUAL MODE";
 
-      //publishStatus(sensorStatus);
+      publishStatus(sensorStatus);
     }
     return;
   }
@@ -348,22 +338,19 @@ if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd 
     controlMode = 2;
     danceMode = 0;
     sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
     return;
   }
 
-  if (cmd.startsWith("DANCE:") || cmd.startsWith("DANCE")) {
+  if (cmd.startsWith("DANCE:")) {
     readSensors();
-
-    int requestedDance = 0;
-    if (cmd.startsWith("DANCE:")) requestedDance = cmd.substring(6).toInt();
-    else requestedDance = cmd.substring(5).toInt();
+    int requestedDance = cmd.substring(6).toInt();
 
     if (requestedDance != 0 && !safeForDanceOrFace()) {
       danceMode = 0;
       stopRobot();
       sensorStatus = "CAN'T DANCE - OBSTACLE OR EDGE";
-      //publishStatus(sensorStatus);
+      publishStatus(sensorStatus);
       return;
     }
 
@@ -383,7 +370,7 @@ if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd 
   danceStatusPublished = false;
 }
 
-//publishStatus(sensorStatus);
+publishStatus(sensorStatus);
     return;
   }
 
@@ -391,7 +378,7 @@ if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd 
     int spd = cmd.substring(6).toInt();
     setSpeed(spd);
     sensorStatus = "SPEED UPDATED";
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
     return;
   }
 }
@@ -445,6 +432,7 @@ button{width:100%;padding:14px;margin:6px 0;border:none;border-radius:12px;color
 input{width:100%}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 @media(max-width:800px){.grid{grid-template-columns:1fr}}
 </style>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 </head>
 <body>
 <header>🤖 LUNA AI Robot Dashboard</header>
@@ -502,18 +490,90 @@ input{width:100%}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 </div>
 
 <script>
-function modeName(m){if(m==1)return 'FACE FOLLOW'; if(m==2)return 'MANUAL'; return 'UNKNOWN'}
+const MQTT_HOST = "10.234.202.209";   // laptop broker now; change to Raspberry Pi IP or raspberrypi.local later
+const MQTT_WS_PORT = 9001;
+const TOPIC_CMD = "luna/robot/cmd";
+const TOPIC_STATUS = "luna/robot/status";
+const TOPIC_SENSORS = "luna/robot/sensors";
+
+function modeName(m){
+  if(m==1)return 'FACE FOLLOW';
+  if(m==2)return 'MANUAL';
+  return 'UNKNOWN';
+}
+
+const clientId = "luna-dashboard-" + Math.random().toString(16).substring(2, 10);
+const mqttClient = mqtt.connect("ws://" + MQTT_HOST + ":" + MQTT_WS_PORT, {
+  clientId: clientId,
+  reconnectPeriod: 1000,
+  connectTimeout: 5000
+});
+
+mqttClient.on("connect", function(){
+  status.innerHTML = "DASHBOARD MQTT CONNECTED";
+  mqttClient.subscribe(TOPIC_STATUS);
+  mqttClient.subscribe(TOPIC_SENSORS);
+});
+
+mqttClient.on("error", function(err){
+  status.innerHTML = "DASHBOARD MQTT ERROR";
+  console.log(err);
+});
+
+mqttClient.on("offline", function(){
+  status.innerHTML = "DASHBOARD MQTT OFFLINE";
+});
+
+mqttClient.on("message", function(topic, payload){
+  const text = payload.toString();
+
+  try {
+    const d = JSON.parse(text);
+
+    if(topic === TOPIC_STATUS){
+      state.innerHTML = d.state || 'UNKNOWN';
+      status.innerHTML = d.status || '';
+      picmd.innerHTML = d.piCommand || '';
+      face.innerHTML = d.face || '';
+      controlMode.innerHTML = modeName(d.controlMode);
+    }
+
+    if(topic === TOPIC_SENSORS){
+      front.innerHTML = d.front;
+      left.innerHTML = d.left;
+      right.innerHTML = d.right;
+      tcrt.innerHTML = d.tcrt;
+      speedValue.innerHTML = d.speed;
+      edgeStatus.innerHTML = d.edge ? 'EDGE DETECTED' : 'SAFE';
+      edgeStatus.className = d.edge ? 'bad' : 'ok';
+    }
+  } catch(e) {
+    console.log('Bad MQTT JSON:', text);
+  }
+});
+
+function sendMqtt(msg){
+  if(!mqttClient.connected){
+    alert('MQTT not connected');
+    return;
+  }
+  mqttClient.publish(TOPIC_CMD, msg);
+  console.log('MQTT sent:', msg);
+}
+
+function setMode(m){sendMqtt('MODE:' + m)}
+function setDance(m){sendMqtt('DANCE:' + m)}
+function manualMove(m){sendMqtt('MANUAL:' + m)}
+function sendSpeed(){sendMqtt('SPEED:' + speedSlider.value)}
+speedSlider.oninput=function(){speedValue.innerHTML=this.value}
+
+// Backup HTTP refresh only for first page load / debug. Controls use MQTT.
 function updateData(){fetch('/data').then(r=>r.json()).then(d=>{
   state.innerHTML=d.state; status.innerHTML=d.status; front.innerHTML=d.front; left.innerHTML=d.left; right.innerHTML=d.right; tcrt.innerHTML=d.tcrt;
   speedValue.innerHTML=d.speed; picmd.innerHTML=d.picmd; face.innerHTML=d.face; controlMode.innerHTML=modeName(d.controlMode);
   edgeStatus.innerHTML=d.edge ? 'EDGE DETECTED' : 'SAFE'; edgeStatus.className=d.edge?'bad':'ok';
 });}
-function setMode(m){fetch('/mode?value='+m)}
-function setDance(m){fetch('/dance?mode='+m).then(r=>r.text()).then(t=>{status.innerHTML=t})}
-function manualMove(m){fetch('/manual?move='+m)}
-function sendSpeed(){fetch('/speed?value='+speedSlider.value)}
-speedSlider.oninput=function(){speedValue.innerHTML=this.value}
-setInterval(updateData,300);
+updateData();
 </script>
 </body>
 </html>
@@ -548,7 +608,7 @@ void handleSpeed() {
   if (server.hasArg("value")) {
     setSpeed(server.arg("value").toInt());
     sensorStatus = "WEB SPEED UPDATED";
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
   }
   server.send(200, "text/plain", "Speed Updated");
 }
@@ -563,7 +623,7 @@ void handleDance() {
       danceMode = 0;
       stopRobot();
       sensorStatus = "CAN'T DANCE - OBSTACLE OR EDGE";
-      //publishStatus(sensorStatus);
+      publishStatus(sensorStatus);
       server.send(200, "text/plain", "CAN'T DANCE - OBSTACLE OR EDGE");
       return;
     }
@@ -576,13 +636,11 @@ void handleDance() {
       noTone(BUZZER_PIN);
       stopRobot();
       sensorStatus = "DANCE STOPPED";
-      danceStatusPublished = false;
     } else {
       sensorStatus = "DANCE MODE STARTED";
-      danceStatusPublished = false;
     }
 
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "Dance Mode Updated");
@@ -602,7 +660,7 @@ void handleMode() {
       if (controlMode == 1) sensorStatus = "FACE FOLLOW MODE";
       else if (controlMode == 2) sensorStatus = "MANUAL MODE";
 
-      //publishStatus(sensorStatus);
+      publishStatus(sensorStatus);
     }
   }
 
@@ -616,7 +674,7 @@ void handleManual() {
     controlMode = 2;
     danceMode = 0;
     sensorStatus = "MANUAL COMMAND: " + manualCommand;
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "Manual Command OK");
@@ -625,27 +683,14 @@ void handleManual() {
 // Keep old HTTP Pi endpoint also working, but MQTT is the main control now.
 void handlePiCmd() {
   if (server.hasArg("move")) {
-    String incomingCmd = server.arg("move");
-    incomingCmd.toUpperCase();
-
-    if (danceMode != 0) {
-      sensorStatus = "IGNORED HTTP FACE CMD - DANCE MODE";
-      server.send(200, "text/plain", "IGNORED - DANCE MODE");
-      return;
-    }
-
-    if (controlMode == 2) {
-      sensorStatus = "IGNORED HTTP FACE CMD - MANUAL MODE";
-      server.send(200, "text/plain", "IGNORED - MANUAL MODE");
-      return;
-    }
-
-    piCommand = incomingCmd;
+    piCommand = server.arg("move");
+    piCommand.toUpperCase();
     lastPiCommandTime = millis();
     controlMode = 1;
+    danceMode = 0;
     faceStatus = (piCommand == "STOP") ? "NO FACE" : "FACE DETECTED";
     sensorStatus = "HTTP PI COMMAND: " + piCommand;
-    //publishStatus(sensorStatus);
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "OK " + piCommand);
@@ -735,29 +780,14 @@ void loop() {
   }
 
 
-  //publishStatus(sensorStatus);
+  // Do not publish status continuously here. Only publish on events.
 
   // Edge safety always active, including manual
   if (edgeDetected()) {
     stopRobot();
     danceMode = 0;
     sensorStatus = "EDGE DETECTED - STOP";
-    //publishStatus(sensorStatus);
-    return;
-  }
-
-  // Face + dance are blocked by 15cm obstacle
-  if (obstacleNear()) {
-    stopRobot();
-    danceMode = 0;
-    sensorStatus = "OBSTACLE WITHIN 15CM - STOP";
-    //publishStatus(sensorStatus);
-    return;
-  }
-
-  // Dance has priority over manual/face while active
-  if (danceMode != 0) {
-    runDanceMode();
+    publishStatus(sensorStatus);
     return;
   }
 
@@ -766,6 +796,20 @@ void loop() {
   if (controlMode == 2) {
     noTone(BUZZER_PIN);
     runCommand(manualCommand, "MANUAL");
+    return;
+  }
+
+  // Face + dance are blocked by 15cm obstacle
+  if (obstacleNear()) {
+    stopRobot();
+    danceMode = 0;
+    sensorStatus = "OBSTACLE WITHIN 15CM - STOP";
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (danceMode != 0) {
+    runDanceMode();
     return;
   }
 
