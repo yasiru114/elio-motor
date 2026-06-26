@@ -7,7 +7,6 @@
 const char* ssid = "Yasiru";
 const char* password = "111111111";
 String lastPublishedStatus = "";
-String lastPublishedEmotion = "";
 
 // ================= MQTT =================
 // MQTT broker runs on Raspberry Pi
@@ -64,10 +63,7 @@ WebServer server(80);
 #define OBSTACLE_LIMIT 15
 
 // ================= VALUES =================
-int speedValue = 240;      // Manual speed
-int faceSpeed = 200;       // Face follow medium speed
-int turnSpeed = 180;       // Face search turn speed
-int danceSpeed = 220;      // Dance speed
+int speedValue = 240;
 long frontDist = 300;
 long leftDist = 300;
 long rightDist = 300;
@@ -80,7 +76,7 @@ String faceStatus = "NO FACE";
 unsigned long lastPiCommandTime = 0;
 
 int controlMode = 1;  // default: Face Follow
-// 1 = Face Follow, 2 = Manual, 3 = Dance
+// 1 = Face Follow, 2 = Manual
 
 String manualCommand = "STOP";
 
@@ -94,21 +90,6 @@ unsigned long lastMqttSensorPublish = 0;
 unsigned long lastMqttStatusPublish = 0;
 
 // ================= MQTT PUBLISH =================
-void publishEmotion(String mood) {
-  if (!mqttClient.connected()) return;
-
-  mood.trim();
-  mood.toUpperCase();
-
-  if (mood == lastPublishedEmotion) return;
-
-  lastPublishedEmotion = mood;
-  mqttClient.publish(TOPIC_ROBOT_EMOTION, mood.c_str(), true);
-
-  Serial.print("EMOTION -> ");
-  Serial.println(mood);
-}
-
 void publishStatus(String statusText) {
   if (!mqttClient.connected()) return;
 
@@ -127,6 +108,19 @@ void publishStatus(String statusText) {
   mqttClient.publish(TOPIC_ROBOT_STATUS, json.c_str(), true);
 }
 
+String lastEmotion = "";
+void publishEmotion(String mood) {
+  mood.trim();
+  mood.toUpperCase();
+  if (mood == lastEmotion) return;
+  lastEmotion = mood;
+  if (mqttClient.connected()) {
+    mqttClient.publish(TOPIC_ROBOT_EMOTION, mood.c_str(), true);
+  }
+  Serial.print("OLED EMOTION: ");
+  Serial.println(mood);
+}
+
 void publishSensors() {
   if (!mqttClient.connected()) return;
 
@@ -136,7 +130,7 @@ void publishSensors() {
   json += "\"right\":" + String(rightDist) + ",";
   json += "\"tcrt\":" + String(tcrtValue) + ",";
   json += "\"edge\":" + String(tcrtValue == EDGE_DETECTED_VALUE ? "true" : "false") + ",";
-  json += "\"obstacle\":" + String(obstacleFront() ? "true" : "false") + ",";
+  json += "\"obstacle\":" + String((frontDist <= OBSTACLE_LIMIT || leftDist <= OBSTACLE_LIMIT || rightDist <= OBSTACLE_LIMIT) ? "true" : "false") + ",";
   json += "\"speed\":" + String(speedValue);
   json += "}";
 
@@ -223,75 +217,55 @@ bool edgeDetected() {
   return tcrtValue == EDGE_DETECTED_VALUE;
 }
 
-bool obstacleFront() {
-  return frontDist <= OBSTACLE_LIMIT;
-}
-
-bool sideDisturb() {
-  return leftDist <= OBSTACLE_LIMIT || rightDist <= OBSTACLE_LIMIT;
-}
-
 bool obstacleNear() {
-  return obstacleFront() || sideDisturb();
+  return frontDist <= OBSTACLE_LIMIT || leftDist <= OBSTACLE_LIMIT || rightDist <= OBSTACLE_LIMIT;
 }
 
 bool safeForDanceOrFace() {
-  // For face follow and dance, front obstacle must stop.
-  // Left/right readings are shown in web data but do not force all modes to SAD.
-  return !edgeDetected() && !obstacleFront();
+  return !edgeDetected() && !obstacleNear();
 }
 
 // ================= MOVEMENT MODES =================
 void searchFace() {
-  sensorStatus = "NO FACE - SLOW SEARCH";
-  publishEmotion("SAD");
+  sensorStatus = "NO FACE - SLOW 360 SEARCH";
 
-  // Face search turn speed
-  ledcWrite(ENA1, turnSpeed);
-  ledcWrite(ENB1, turnSpeed);
-  ledcWrite(ENA2, turnSpeed);
-  ledcWrite(ENB2, turnSpeed);
+  // Search rotation speed only = 210
+  ledcWrite(ENA1, 210);
+  ledcWrite(ENB1, 210);
+  ledcWrite(ENA2, 210);
+  ledcWrite(ENB2, 210);
 
-  turnRight();  // rotate slowly until Python detects face and sends FORWARD
+  turnRight();  // rotate slowly until Pi detects face and sends FORWARD
+  publishEmotion("ANGRY");
 }
 
 void runCommand(String cmd, String sourceText) {
-  cmd.trim();
-  cmd.toUpperCase();
-
-  // Manual uses slider speed. Face uses medium speed.
-  if (sourceText.indexOf("FACE") >= 0) {
-    ledcWrite(ENA1, faceSpeed);
-    ledcWrite(ENB1, faceSpeed);
-    ledcWrite(ENA2, faceSpeed);
-    ledcWrite(ENB2, faceSpeed);
-  } else {
-    setSpeed(speedValue);
-  }
+  setSpeed(speedValue);
 
   if (cmd == "FORWARD") {
     sensorStatus = sourceText + " - FORWARD";
     moveForward();
 
+    // Face detected/FORWARD = LOVE, Manual forward = HAPPY
     if (sourceText.indexOf("FACE") >= 0) publishEmotion("LOVE");
     else publishEmotion("HAPPY");
-  } 
-  else if (cmd == "LEFT") {
+
+  } else if (cmd == "LEFT") {
     sensorStatus = sourceText + " - LEFT";
     turnLeft();
     publishEmotion("ANGRY");
-  } 
-  else if (cmd == "RIGHT") {
+
+  } else if (cmd == "RIGHT") {
     sensorStatus = sourceText + " - RIGHT";
     turnRight();
     publishEmotion("ANGRY");
-  } 
-  else if (cmd == "BACKWARD") {
+
+  } else if (cmd == "BACKWARD") {
     sensorStatus = sourceText + " - BACKWARD";
     moveBackward();
     publishEmotion("ANGRY");
-  } 
-  else {
+
+  } else {
     sensorStatus = sourceText + " - STOP";
     stopRobot();
     publishEmotion("SAD");
@@ -312,8 +286,6 @@ void runDanceMode() {
   danceTimer = now;
   danceStep++;
 
-  publishEmotion("HAPPY");
-
   if (!danceStatusPublished) {
     if (danceMode == 1) sensorStatus = "DANCE 1 - SLOW";
     else if (danceMode == 2) sensorStatus = "DANCE 2 - MEDIUM";
@@ -322,6 +294,8 @@ void runDanceMode() {
     // Do not publish every dance step. DANCE command already publishes start/stop.
     danceStatusPublished = true;
   }
+
+  publishEmotion("HAPPY");
 
   if (danceMode == 1) {
     tone(BUZZER_PIN, 440, 80);
@@ -351,77 +325,6 @@ void runDanceMode() {
 }
 
 // ================= MQTT COMMAND HANDLER =================
-void startDance(int requestedDance) {
-  readSensors();
-
-  if (requestedDance != 0 && !safeForDanceOrFace()) {
-    danceMode = 0;
-    stopRobot();
-    sensorStatus = "CAN'T DANCE - OBSTACLE OR EDGE";
-    publishEmotion(edgeDetected() ? "EMERGENCY" : "SAD");
-    publishStatus(sensorStatus);
-    return;
-  }
-
-  danceMode = requestedDance;
-  danceStep = 0;
-  danceTimer = millis();
-  danceStatusPublished = false;
-
-  if (danceMode == 0) {
-    noTone(BUZZER_PIN);
-    stopRobot();
-    controlMode = 2;       // after dance stop, stay in manual mode
-    sensorStatus = "DANCE STOPPED";
-    publishEmotion("SAD");
-  } else {
-    controlMode = 3;       // dance mode, ignore face/manual until stopped or mode changed
-    sensorStatus = "DANCE MODE STARTED";
-    publishEmotion("HAPPY");
-  }
-
-  publishStatus(sensorStatus);
-}
-
-void handleFaceCommand(String cmd) {
-  cmd.trim();
-  cmd.toUpperCase();
-
-  // Face topic only works in FACE FOLLOW mode.
-  // It cannot interrupt manual mode or dance mode.
-  if (controlMode != 1 || danceMode != 0) {
-    return;
-  }
-
-  if (cmd == "FORWARD" || cmd == "STOP") {
-    piCommand = cmd;
-    lastPiCommandTime = millis();
-
-    if (cmd == "STOP") faceStatus = "NO FACE";
-    else faceStatus = "FACE DETECTED";
-
-    sensorStatus = "FACE COMMAND: " + cmd;
-    publishStatus(sensorStatus);
-  }
-}
-
-void handleManualCommand(String cmd) {
-  cmd.trim();
-  cmd.toUpperCase();
-
-  // Manual command switches to manual and stops dance.
-  manualCommand = cmd;
-  controlMode = 2;
-  danceMode = 0;
-  noTone(BUZZER_PIN);
-
-  sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
-  if (manualCommand == "FORWARD") publishEmotion("HAPPY");
-  else if (manualCommand == "LEFT" || manualCommand == "RIGHT" || manualCommand == "BACKWARD") publishEmotion("ANGRY");
-  else publishEmotion("SAD");
-  publishStatus(sensorStatus);
-}
-
 void handleMqttCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
@@ -429,16 +332,16 @@ void handleMqttCommand(String cmd) {
   Serial.print("MQTT CMD: ");
   Serial.println(cmd);
 
-  // Emergency/normal stop from any topic must always stop immediately.
-  if (cmd == "STOP" || cmd == "EMERGENCY_STOP") {
+  if (cmd == "FORWARD" || cmd == "STOP" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
+    piCommand = cmd;
+    lastPiCommandTime = millis();
+    controlMode = 1;
     danceMode = 0;
-    noTone(BUZZER_PIN);
-    manualCommand = "STOP";
-    piCommand = "STOP";
-    faceStatus = "NO FACE";
-    stopRobot();
-    sensorStatus = "MQTT STOP";
-    publishEmotion("SAD");
+
+    if (cmd == "STOP") faceStatus = "NO FACE";
+    else faceStatus = "FACE DETECTED";
+
+    sensorStatus = "MQTT PI COMMAND: " + cmd;
     publishStatus(sensorStatus);
     return;
   }
@@ -446,17 +349,15 @@ void handleMqttCommand(String cmd) {
   if (cmd.startsWith("MODE:")) {
     int mode = cmd.substring(5).toInt();
 
+    // Only 1 and 2 now. No game mode.
     if (mode == 1 || mode == 2) {
       controlMode = mode;
       danceMode = 0;
       manualCommand = "STOP";
-      piCommand = "STOP";
-      faceStatus = "NO FACE";
-      noTone(BUZZER_PIN);
       stopRobot();
 
       if (controlMode == 1) sensorStatus = "FACE FOLLOW MODE";
-      else sensorStatus = "MANUAL MODE";
+      else if (controlMode == 2) sensorStatus = "MANUAL MODE";
 
       publishEmotion("SAD");
       publishStatus(sensorStatus);
@@ -465,12 +366,45 @@ void handleMqttCommand(String cmd) {
   }
 
   if (cmd.startsWith("MANUAL:")) {
-    handleManualCommand(cmd.substring(7));
+    manualCommand = cmd.substring(7);
+    controlMode = 2;
+    danceMode = 0;
+    sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
+    publishStatus(sensorStatus);
     return;
   }
 
   if (cmd.startsWith("DANCE:")) {
-    startDance(cmd.substring(6).toInt());
+    readSensors();
+    int requestedDance = cmd.substring(6).toInt();
+
+    if (requestedDance != 0 && !safeForDanceOrFace()) {
+      danceMode = 0;
+      stopRobot();
+      sensorStatus = "CAN'T DANCE - OBSTACLE OR EDGE";
+      publishStatus(sensorStatus);
+      return;
+    }
+
+    danceMode = requestedDance;
+    danceStep = 0;
+    danceTimer = millis();
+
+    if (danceMode == 0) {
+  noTone(BUZZER_PIN);
+  stopRobot();
+  sensorStatus = "DANCE STOPPED";
+  publishEmotion("SAD");
+
+  danceStatusPublished = false;
+} else {
+  sensorStatus = "DANCE MODE STARTED";
+  publishEmotion("HAPPY");
+
+  danceStatusPublished = false;
+}
+
+publishStatus(sensorStatus);
     return;
   }
 
@@ -479,13 +413,6 @@ void handleMqttCommand(String cmd) {
     setSpeed(spd);
     sensorStatus = "SPEED UPDATED";
     publishStatus(sensorStatus);
-    return;
-  }
-
-  // Old common command topic support:
-  // LEFT/RIGHT/BACKWARD/FORWARD become manual commands.
-  if (cmd == "FORWARD" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
-    handleManualCommand(cmd);
     return;
   }
 }
@@ -500,17 +427,28 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String t = String(topic);
 
   if (t == TOPIC_ROBOT_FACE) {
-    handleFaceCommand(msg);     // Python face: FORWARD / STOP only
+    // Python face commands work ONLY in Face Follow mode.
+    // Manual mode and Dance mode ignore face commands.
+    msg.trim();
+    msg.toUpperCase();
+    if (controlMode == 1 && danceMode == 0) {
+      piCommand = msg;
+      lastPiCommandTime = millis();
+      faceStatus = (msg == "FORWARD") ? "FACE DETECTED" : "NO FACE";
+      sensorStatus = "MQTT FACE COMMAND: " + msg;
+      publishStatus(sensorStatus);
+    }
     return;
   }
 
   if (t == TOPIC_ROBOT_MANUAL) {
-    handleManualCommand(msg);   // PC manual topic
+    // Manual topic works ONLY as manual control.
+    handleMqttCommand("MANUAL:" + msg);
     return;
   }
 
   if (t == TOPIC_ROBOT_CMD) {
-    handleMqttCommand(msg);     // old shared topic still supported
+    handleMqttCommand(msg);     // mode/dance/speed/common topic
     return;
   }
 }
@@ -603,45 +541,24 @@ input{width:100%}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   </div>
 
   <div class="card">
-    <h2>Manual Speed</h2>
+    <h2>Speed</h2>
     <h2><span id="speedValue">240</span> / 255</h2>
     <input type="range" min="0" max="255" value="240" id="speedSlider">
-    <button class="green" onclick="sendSpeed()">Set Manual Speed</button>
-  </div>
-
-  <div class="card">
-    <h2>Face Forward Speed</h2>
-    <h2><span id="faceSpeedValue">200</span> / 255</h2>
-    <input type="range" min="120" max="240" value="200" id="faceSpeedSlider">
-    <button class="green" onclick="sendFaceSpeed()">Set Face Speed</button>
-  </div>
-
-  <div class="card">
-    <h2>Face Search Turn Speed</h2>
-    <h2><span id="turnSpeedValue">180</span> / 255</h2>
-    <input type="range" min="120" max="220" value="180" id="turnSpeedSlider">
-    <button class="green" onclick="sendTurnSpeed()">Set Search Speed</button>
+    <button class="green" onclick="sendSpeed()">Set Speed</button>
   </div>
 </div>
 
 <script>
-function modeName(m){ if(m==1)return 'FACE FOLLOW'; if(m==2)return 'MANUAL'; if(m==3)return 'DANCE'; return 'UNKNOWN'; }
+function modeName(m){ if(m==1)return 'FACE FOLLOW'; if(m==2)return 'MANUAL'; return 'UNKNOWN'; }
 function api(url){ fetch(url).then(()=>setTimeout(updateData,150)).catch(e=>alert('ESP32 web command failed')); }
 function setMode(m){ api('/mode?value=' + m); }
 function setDance(m){ api('/dance?mode=' + m); }
 function manualMove(m){ api('/manual?move=' + m); }
 function sendSpeed(){ api('/speed?value=' + speedSlider.value); }
-function sendFaceSpeed(){ api('/faceSpeed?value=' + faceSpeedSlider.value); }
-function sendTurnSpeed(){ api('/turnSpeed?value=' + turnSpeedSlider.value); }
 speedSlider.oninput=function(){speedValue.innerHTML=this.value;}
-faceSpeedSlider.oninput=function(){faceSpeedValue.innerHTML=this.value;}
-turnSpeedSlider.oninput=function(){turnSpeedValue.innerHTML=this.value;}
 function updateData(){fetch('/data').then(r=>r.json()).then(d=>{
   state.innerHTML=d.state; status.innerHTML=d.status; front.innerHTML=d.front; left.innerHTML=d.left; right.innerHTML=d.right; tcrt.innerHTML=d.tcrt;
-  speedValue.innerHTML=d.speed; speedSlider.value=d.speed;
-  faceSpeedValue.innerHTML=d.faceSpeed; faceSpeedSlider.value=d.faceSpeed;
-  turnSpeedValue.innerHTML=d.turnSpeed; turnSpeedSlider.value=d.turnSpeed;
-  picmd.innerHTML=d.picmd; face.innerHTML=d.face; controlMode.innerHTML=modeName(d.controlMode);
+  speedValue.innerHTML=d.speed; picmd.innerHTML=d.picmd; face.innerHTML=d.face; controlMode.innerHTML=modeName(d.controlMode);
   edgeStatus.innerHTML=d.edge ? 'EDGE DETECTED' : 'SAFE'; edgeStatus.className=d.edge?'bad':'ok';
 }).catch(e=>{ status.innerHTML='WEB DATA ERROR'; });}
 setInterval(updateData,1000);
@@ -665,8 +582,6 @@ void handleData() {
   json += "\"tcrt\":" + String(tcrtValue) + ",";
   json += "\"edge\":" + String(edgeDetected() ? "true" : "false") + ",";
   json += "\"speed\":" + String(speedValue) + ",";
-  json += "\"faceSpeed\":" + String(faceSpeed) + ",";
-  json += "\"turnSpeed\":" + String(turnSpeed) + ",";
   json += "\"dance\":" + String(danceMode) + ",";
   json += "\"controlMode\":" + String(controlMode) + ",";
   json += "\"state\":\"" + robotState + "\",";
@@ -687,28 +602,36 @@ void handleSpeed() {
   server.send(200, "text/plain", "Speed Updated");
 }
 
-void handleFaceSpeed() {
-  if (server.hasArg("value")) {
-    faceSpeed = constrain(server.arg("value").toInt(), 120, 240);
-    sensorStatus = "FACE SPEED UPDATED: " + String(faceSpeed);
-    publishStatus(sensorStatus);
-  }
-  server.send(200, "text/plain", "Face Speed Updated");
-}
-
-void handleTurnSpeed() {
-  if (server.hasArg("value")) {
-    turnSpeed = constrain(server.arg("value").toInt(), 120, 220);
-    sensorStatus = "FACE SEARCH SPEED UPDATED: " + String(turnSpeed);
-    publishStatus(sensorStatus);
-  }
-  server.send(200, "text/plain", "Face Search Speed Updated");
-}
-
 void handleDance() {
+  readSensors();
+
   if (server.hasArg("mode")) {
     int requestedDance = server.arg("mode").toInt();
-    startDance(requestedDance);
+
+    if (requestedDance != 0 && !safeForDanceOrFace()) {
+      danceMode = 0;
+      stopRobot();
+      sensorStatus = "CAN'T DANCE - OBSTACLE OR EDGE";
+      publishStatus(sensorStatus);
+      server.send(200, "text/plain", "CAN'T DANCE - OBSTACLE OR EDGE");
+      return;
+    }
+
+    danceMode = requestedDance;
+    danceStep = 0;
+    danceTimer = millis();
+
+    if (danceMode == 0) {
+      noTone(BUZZER_PIN);
+      stopRobot();
+      sensorStatus = "DANCE STOPPED";
+      publishEmotion("SAD");
+    } else {
+      sensorStatus = "DANCE MODE STARTED";
+      publishEmotion("HAPPY");
+    }
+
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "Dance Mode Updated");
@@ -737,23 +660,32 @@ void handleMode() {
 
 void handleManual() {
   if (server.hasArg("move")) {
-    handleManualCommand(server.arg("move"));
+    manualCommand = server.arg("move");
+    manualCommand.toUpperCase();
+    controlMode = 2;
+    danceMode = 0;
+    sensorStatus = "MANUAL COMMAND: " + manualCommand;
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "Manual Command OK");
 }
 
-
 // Keep old HTTP Pi endpoint also working, but MQTT is the main control now.
 void handlePiCmd() {
   if (server.hasArg("move")) {
-    String move = server.arg("move");
-    handleFaceCommand(move);
+    piCommand = server.arg("move");
+    piCommand.toUpperCase();
+    lastPiCommandTime = millis();
+    controlMode = 1;
+    danceMode = 0;
+    faceStatus = (piCommand == "STOP") ? "NO FACE" : "FACE DETECTED";
+    sensorStatus = "HTTP PI COMMAND: " + piCommand;
+    publishStatus(sensorStatus);
   }
 
   server.send(200, "text/plain", "OK " + piCommand);
 }
-
 
 // ================= SETUP =================
 void setup() {
@@ -811,8 +743,6 @@ Serial.println(WiFi.gatewayIP());
   server.on("/", handleRoot);
   server.on("/data", handleData);
   server.on("/speed", handleSpeed);
-  server.on("/faceSpeed", handleFaceSpeed);
-  server.on("/turnSpeed", handleTurnSpeed);
   server.on("/dance", handleDance);
   server.on("/mode", handleMode);
   server.on("/manual", handleManual);
@@ -840,65 +770,52 @@ void loop() {
     publishSensors();
   }
 
-  // Safety priority 1: Edge / fall danger always stops everything
+
+  // Do not publish status continuously here. Only publish on events.
+
+  // Safety always active in ALL modes: manual, face, dance
   if (edgeDetected()) {
     stopRobot();
     danceMode = 0;
-    noTone(BUZZER_PIN);
-    sensorStatus = "EDGE / FALL DANGER - STOP";
+    sensorStatus = "EDGE DETECTED - STOP";
     publishEmotion("EMERGENCY");
     publishStatus(sensorStatus);
     return;
   }
 
-  // Safety priority 2: Front obstacle blocks forward, face-follow, and dance.
-  // Manual LEFT / RIGHT / BACKWARD can still work so the robot can escape.
-  if (obstacleFront()) {
-    bool tryingForwardManual = (controlMode == 2 && manualCommand == "FORWARD");
-    bool tryingFaceOrDance = (controlMode == 1 || controlMode == 3 || danceMode != 0);
-
-    if (tryingForwardManual || tryingFaceOrDance) {
-      stopRobot();
-      danceMode = 0;
-      noTone(BUZZER_PIN);
-      sensorStatus = "FRONT OBSTACLE - STOP";
-      publishEmotion("SAD");
-      publishStatus(sensorStatus);
-      return;
-    }
-  }
-
-  // Dance mode: only dance runs. Face/manual commands are ignored until stop/mode change.
-  if (controlMode == 3 && danceMode != 0) {
-    ledcWrite(ENA1, danceSpeed);
-    ledcWrite(ENB1, danceSpeed);
-    ledcWrite(ENA2, danceSpeed);
-    ledcWrite(ENB2, danceSpeed);
-    runDanceMode();
+  if (obstacleNear()) {
+    stopRobot();
+    danceMode = 0;
+    sensorStatus = "OBSTACLE WITHIN 15CM - STOP";
+    publishEmotion("SAD");
+    publishStatus(sensorStatus);
     return;
   }
 
-  // Manual mode: only manual command runs. Face commands are ignored.
+  // Manual mode: ONLY manual commands run. Face commands are ignored.
   if (controlMode == 2) {
     noTone(BUZZER_PIN);
     runCommand(manualCommand, "MANUAL");
     return;
   }
 
-  // Face follow mode: only Python face command runs. Manual/dance does not run.
-  if (controlMode == 1) {
-    noTone(BUZZER_PIN);
+  if (danceMode != 0) {
+    runDanceMode();
+    return;
+  }
 
+  noTone(BUZZER_PIN);
+
+  if (controlMode == 1) {
     if (millis() - lastPiCommandTime > 1200) {
       piCommand = "STOP";
       faceStatus = "NO FACE / PI TIMEOUT";
     }
 
-    if (piCommand == "FORWARD") {
-      runCommand("FORWARD", "FACE CENTER");
-    } else {
-      searchFace();
-    }
+    if (piCommand == "FORWARD") runCommand("FORWARD", "FACE CENTER");
+    else if (piCommand == "LEFT") runCommand("LEFT", "FACE LEFT");
+    else if (piCommand == "RIGHT") runCommand("RIGHT", "FACE RIGHT");
+    else searchFace();
 
     return;
   }
