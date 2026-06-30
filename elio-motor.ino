@@ -73,7 +73,7 @@ const char* TOPIC_ROBOT_EMOTION = "luna/robot/emotion";
 // ================= VALUES =================
 int speedValue = 240;
 int faceSpeed = 200;
-int turnSpeed = 180;
+int turnSpeed = 230;
 int danceSpeed = 220;
 
 long frontDist = 300;
@@ -82,7 +82,7 @@ long rightDist = 300;
 int tcrtValue = 0;
 
 String robotState = "STOP";
-String sensorStatus = "READY";
+String sensorStatus = "READY - MANUAL MODE";
 String piCommand = "STOP";
 String faceStatus = "NO FACE";
 String manualCommand = "STOP";
@@ -90,8 +90,9 @@ String manualCommand = "STOP";
 unsigned long lastPiCommandTime = 0;
 unsigned long lastMqttSensorPublish = 0;
 
-int controlMode = 1; 
+int controlMode = 2; 
 // 1 = Face Follow, 2 = Manual, 3 = Dance
+// Default is MANUAL mode. Face MQTT commands are ignored until FACE mode is selected.
 
 int danceMode = 0;
 int danceStep = 0;
@@ -407,7 +408,11 @@ void handleFaceCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
 
-  if (controlMode != 1 || danceMode != 0) return;
+  if (controlMode != 1 || danceMode != 0) {
+    // IMPORTANT: face detection cannot move robot in MANUAL or DANCE mode.
+    faceStatus = "FACE IGNORED - MANUAL MODE";
+    return;
+  }
 
   if (cmd == "FORWARD" || cmd == "STOP") {
     piCommand = cmd;
@@ -421,17 +426,89 @@ void handleFaceCommand(String cmd) {
   }
 }
 
+void enterManualMode() {
+  controlMode = 2;
+  danceMode = 0;
+  noTone(BUZZER_PIN);
+  piCommand = "STOP";
+  faceStatus = "FACE IGNORED - MANUAL MODE";
+  lastPiCommandTime = 0;
+  stopRobot();
+  sensorStatus = "MANUAL MODE";
+  publishStatus(sensorStatus);
+}
+
+void enterFaceMode() {
+  controlMode = 1;
+  danceMode = 0;
+  noTone(BUZZER_PIN);
+  manualCommand = "STOP";
+  piCommand = "STOP";
+  faceStatus = "NO FACE";
+  lastPiCommandTime = millis();
+  stopRobot();
+  sensorStatus = "FACE FOLLOW MODE";
+  publishStatus(sensorStatus);
+}
+
 void handleManualCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
 
-  manualCommand = cmd;
-  controlMode = 2;
-  danceMode = 0;
-  noTone(BUZZER_PIN);
+  // Same manual topic can change modes:
+  // mosquitto_pub -h raspberrypi.local -t luna/robot/manual -m "MANUAL"
+  // mosquitto_pub -h raspberrypi.local -t luna/robot/manual -m "FACE"
+  if (cmd == "MANUAL" || cmd == "MODE:MANUAL" || cmd == "MODE:2") {
+    enterManualMode();
+    return;
+  }
 
-  sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
+  if (cmd == "FACE" || cmd == "FACE_FOLLOW" || cmd == "MODE:FACE" || cmd == "MODE:1") {
+    enterFaceMode();
+    return;
+  }
 
+  if (cmd.startsWith("SPEED:")) {
+    setSpeed(cmd.substring(6).toInt());
+    sensorStatus = "MANUAL SPEED UPDATED: " + String(speedValue);
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd.startsWith("FACE_SPEED:")) {
+    faceSpeed = constrain(cmd.substring(11).toInt(), 120, 255);
+    sensorStatus = "FACE SPEED UPDATED: " + String(faceSpeed);
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd.startsWith("TURN_SPEED:")) {
+    turnSpeed = constrain(cmd.substring(11).toInt(), 120, 255);
+    sensorStatus = "FACE SEARCH SPEED UPDATED: " + String(turnSpeed);
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd.startsWith("DANCE:")) {
+    startDance(cmd.substring(6).toInt());
+    return;
+  }
+
+  // Any movement command from manual topic forces MANUAL mode and clears face command.
+  if (cmd == "FORWARD" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD" || cmd == "STOP") {
+    manualCommand = cmd;
+    controlMode = 2;
+    danceMode = 0;
+    noTone(BUZZER_PIN);
+    piCommand = "STOP";                 // IMPORTANT: old face FORWARD is cleared
+    faceStatus = "FACE IGNORED - MANUAL MODE";
+    lastPiCommandTime = 0;
+    sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  sensorStatus = "UNKNOWN MANUAL COMMAND: " + cmd;
   publishStatus(sensorStatus);
 }
 
@@ -442,6 +519,16 @@ void handleMqttCommand(String cmd) {
   Serial.print("MQTT CMD: ");
   Serial.println(cmd);
 
+  if (cmd == "MANUAL") {
+    enterManualMode();
+    return;
+  }
+
+  if (cmd == "FACE" || cmd == "FACE_FOLLOW") {
+    enterFaceMode();
+    return;
+  }
+
   if (cmd == "STOP" || cmd == "EMERGENCY_STOP") {
     danceMode = 0;
     noTone(BUZZER_PIN);
@@ -449,28 +536,19 @@ void handleMqttCommand(String cmd) {
     piCommand = "STOP";
     faceStatus = "NO FACE";
     stopRobot();
-    sensorStatus = "MQTT STOP";
+    controlMode = 2;
+    sensorStatus = "MQTT STOP - MANUAL MODE";
     publishStatus(sensorStatus);
     return;
   }
 
   if (cmd.startsWith("MODE:")) {
-    int mode = cmd.substring(5).toInt();
+    String modeText = cmd.substring(5);
+    modeText.trim();
+    modeText.toUpperCase();
 
-    if (mode == 1 || mode == 2) {
-      controlMode = mode;
-      danceMode = 0;
-      manualCommand = "STOP";
-      piCommand = "STOP";
-      faceStatus = "NO FACE";
-      noTone(BUZZER_PIN);
-      stopRobot();
-
-      if (controlMode == 1) sensorStatus = "FACE FOLLOW MODE";
-      else sensorStatus = "MANUAL MODE";
-
-      publishStatus(sensorStatus);
-    }
+    if (modeText == "1" || modeText == "FACE" || modeText == "FACE_FOLLOW") enterFaceMode();
+    else if (modeText == "2" || modeText == "MANUAL") enterManualMode();
     return;
   }
 
@@ -485,9 +563,22 @@ void handleMqttCommand(String cmd) {
   }
 
   if (cmd.startsWith("SPEED:")) {
-    int spd = cmd.substring(6).toInt();
-    setSpeed(spd);
-    sensorStatus = "SPEED UPDATED";
+    setSpeed(cmd.substring(6).toInt());
+    sensorStatus = "MANUAL SPEED UPDATED: " + String(speedValue);
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd.startsWith("FACE_SPEED:")) {
+    faceSpeed = constrain(cmd.substring(11).toInt(), 120, 255);
+    sensorStatus = "FACE SPEED UPDATED: " + String(faceSpeed);
+    publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd.startsWith("TURN_SPEED:")) {
+    turnSpeed = constrain(cmd.substring(11).toInt(), 120, 255);
+    sensorStatus = "FACE SEARCH SPEED UPDATED: " + String(turnSpeed);
     publishStatus(sensorStatus);
     return;
   }
@@ -599,7 +690,7 @@ void reconnectMqtt() {
     mqttClient.subscribe(TOPIC_ROBOT_MANUAL);
     mqttClient.subscribe(TOPIC_ROBOT_FACE);
 
-    publishStatus("MQTT CONNECTED - READY");
+    publishStatus("MQTT CONNECTED - READY - MANUAL MODE");
     publishEmotion("HAPPY");
   } else {
     Serial.print("failed rc=");
@@ -646,7 +737,7 @@ p{color:var(--muted)} b{color:white}
     <h2>Robot State</h2>
     <div id="state" class="big">STOP</div>
     <h3 id="status" class="warn">READY</h3>
-    <p>Mode: <b id="controlMode">FACE FOLLOW</b></p>
+    <p>Mode: <b id="controlMode">MANUAL</b></p>
     <p>Pi Command: <b id="picmd">STOP</b></p>
     <p>Face: <b id="face">NO FACE</b></p>
     <p>MQTT IP: <b id="mqttip">...</b></p>
@@ -707,8 +798,8 @@ p{color:var(--muted)} b{color:white}
 
   <div class="card">
     <h2>Face Search Turn Speed</h2>
-    <h2><span id="turnSpeedValue">180</span> / 255</h2>
-    <input type="range" min="120" max="220" value="180" id="turnSpeedSlider">
+    <h2><span id="turnSpeedValue">230</span> / 255</h2>
+    <input type="range" min="120" max="255" value="230" id="turnSpeedSlider">
     <button class="green" onclick="sendTurnSpeed()">Set Search Speed</button>
   </div>
 </div>
@@ -806,7 +897,7 @@ void handleFaceSpeed() {
 
 void handleTurnSpeed() {
   if (server.hasArg("value")) {
-    turnSpeed = constrain(server.arg("value").toInt(), 120, 220);
+    turnSpeed = constrain(server.arg("value").toInt(), 120, 255);
     sensorStatus = "FACE SEARCH SPEED UPDATED: " + String(turnSpeed);
     publishStatus(sensorStatus);
   }
@@ -823,21 +914,8 @@ void handleDance() {
 void handleMode() {
   if (server.hasArg("value")) {
     int requestedMode = server.arg("value").toInt();
-
-    if (requestedMode == 1 || requestedMode == 2) {
-      controlMode = requestedMode;
-      danceMode = 0;
-      manualCommand = "STOP";
-      piCommand = "STOP";
-      faceStatus = "NO FACE";
-      noTone(BUZZER_PIN);
-      stopRobot();
-
-      if (controlMode == 1) sensorStatus = "FACE FOLLOW MODE";
-      else sensorStatus = "MANUAL MODE";
-
-      publishStatus(sensorStatus);
-    }
+    if (requestedMode == 1) enterFaceMode();
+    else if (requestedMode == 2) enterManualMode();
   }
 
   server.send(200, "text/plain", "Mode Updated");
@@ -899,6 +977,10 @@ void setup() {
 
   setSpeed(speedValue);
   stopRobot();
+  controlMode = 2;
+  manualCommand = "STOP";
+  piCommand = "STOP";
+  faceStatus = "FACE IGNORED - MANUAL MODE";
 
   WiFi.mode(WIFI_STA);
 
@@ -1014,6 +1096,7 @@ void loop() {
 
   if (controlMode == 2) {
     noTone(BUZZER_PIN);
+    piCommand = "STOP";   // safety: manual mode never uses face FORWARD
     runCommand(manualCommand, "MANUAL");
     return;
   }
