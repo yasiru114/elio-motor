@@ -92,7 +92,7 @@ unsigned long lastMqttSensorPublish = 0;
 
 int controlMode = 2; 
 // 1 = Face Follow, 2 = Manual, 3 = Dance
-// Default is MANUAL mode. Face MQTT commands are ignored until FACE mode is selected.
+// DEFAULT = MANUAL. Face commands cannot move robot in manual mode.
 
 int danceMode = 0;
 int danceStep = 0;
@@ -404,32 +404,11 @@ void startDance(int requestedDance) {
   publishStatus(sensorStatus);
 }
 
-void handleFaceCommand(String cmd) {
-  cmd.trim();
-  cmd.toUpperCase();
-
-  if (controlMode != 1 || danceMode != 0) {
-    // IMPORTANT: face detection cannot move robot in MANUAL or DANCE mode.
-    faceStatus = "FACE IGNORED - MANUAL MODE";
-    return;
-  }
-
-  if (cmd == "FORWARD" || cmd == "STOP") {
-    piCommand = cmd;
-    lastPiCommandTime = millis();
-
-    if (cmd == "STOP") faceStatus = "NO FACE";
-    else faceStatus = "FACE DETECTED";
-
-    sensorStatus = "FACE COMMAND: " + cmd;
-    publishStatus(sensorStatus);
-  }
-}
-
 void enterManualMode() {
   controlMode = 2;
   danceMode = 0;
   noTone(BUZZER_PIN);
+  manualCommand = "STOP";
   piCommand = "STOP";
   faceStatus = "FACE IGNORED - MANUAL MODE";
   lastPiCommandTime = 0;
@@ -451,11 +430,36 @@ void enterFaceMode() {
   publishStatus(sensorStatus);
 }
 
+void handleFaceCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+
+  // STRICT SAFETY RULE:
+  // Face detection FORWARD/STOP works ONLY in Face Follow mode.
+  // In Manual mode, face messages are ignored and robot will NOT move forward.
+  if (controlMode != 1 || danceMode != 0) {
+    piCommand = "STOP";
+    faceStatus = "FACE IGNORED - MANUAL MODE";
+    return;
+  }
+
+  if (cmd == "FORWARD" || cmd == "STOP") {
+    piCommand = cmd;
+    lastPiCommandTime = millis();
+
+    if (cmd == "STOP") faceStatus = "NO FACE";
+    else faceStatus = "FACE DETECTED";
+
+    sensorStatus = "FACE COMMAND: " + cmd;
+    publishStatus(sensorStatus);
+  }
+}
+
 void handleManualCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
 
-  // Same manual topic can change modes:
+  // Mode commands on manual topic:
   // mosquitto_pub -h raspberrypi.local -t luna/robot/manual -m "MANUAL"
   // mosquitto_pub -h raspberrypi.local -t luna/robot/manual -m "FACE"
   if (cmd == "MANUAL" || cmd == "MODE:MANUAL" || cmd == "MODE:2") {
@@ -489,27 +493,19 @@ void handleManualCommand(String cmd) {
     return;
   }
 
-  if (cmd.startsWith("DANCE:")) {
-    startDance(cmd.substring(6).toInt());
-    return;
-  }
-
-  // Any movement command from manual topic forces MANUAL mode and clears face command.
   if (cmd == "FORWARD" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD" || cmd == "STOP") {
-    manualCommand = cmd;
+    // Manual topic movement is allowed only as manual control.
+    // It also clears face command so face cannot override manual mode.
     controlMode = 2;
     danceMode = 0;
     noTone(BUZZER_PIN);
-    piCommand = "STOP";                 // IMPORTANT: old face FORWARD is cleared
+    piCommand = "STOP";
     faceStatus = "FACE IGNORED - MANUAL MODE";
-    lastPiCommandTime = 0;
+    manualCommand = cmd;
     sensorStatus = "MQTT MANUAL COMMAND: " + manualCommand;
     publishStatus(sensorStatus);
     return;
   }
-
-  sensorStatus = "UNKNOWN MANUAL COMMAND: " + cmd;
-  publishStatus(sensorStatus);
 }
 
 void handleMqttCommand(String cmd) {
@@ -519,34 +515,31 @@ void handleMqttCommand(String cmd) {
   Serial.print("MQTT CMD: ");
   Serial.println(cmd);
 
-  if (cmd == "MANUAL") {
-    enterManualMode();
-    return;
-  }
-
-  if (cmd == "FACE" || cmd == "FACE_FOLLOW") {
-    enterFaceMode();
-    return;
-  }
-
-  if (cmd == "STOP" || cmd == "EMERGENCY_STOP") {
+  if (cmd == "EMERGENCY_STOP") {
     danceMode = 0;
     noTone(BUZZER_PIN);
     manualCommand = "STOP";
     piCommand = "STOP";
     faceStatus = "NO FACE";
     stopRobot();
-    controlMode = 2;
-    sensorStatus = "MQTT STOP - MANUAL MODE";
+    sensorStatus = "MQTT EMERGENCY STOP";
     publishStatus(sensorStatus);
+    return;
+  }
+
+  if (cmd == "MANUAL" || cmd == "MODE:MANUAL" || cmd == "MODE:2") {
+    enterManualMode();
+    return;
+  }
+
+  if (cmd == "FACE" || cmd == "FACE_FOLLOW" || cmd == "MODE:FACE" || cmd == "MODE:1") {
+    enterFaceMode();
     return;
   }
 
   if (cmd.startsWith("MODE:")) {
     String modeText = cmd.substring(5);
     modeText.trim();
-    modeText.toUpperCase();
-
     if (modeText == "1" || modeText == "FACE" || modeText == "FACE_FOLLOW") enterFaceMode();
     else if (modeText == "2" || modeText == "MANUAL") enterManualMode();
     return;
@@ -564,7 +557,7 @@ void handleMqttCommand(String cmd) {
 
   if (cmd.startsWith("SPEED:")) {
     setSpeed(cmd.substring(6).toInt());
-    sensorStatus = "MANUAL SPEED UPDATED: " + String(speedValue);
+    sensorStatus = "SPEED UPDATED";
     publishStatus(sensorStatus);
     return;
   }
@@ -583,7 +576,21 @@ void handleMqttCommand(String cmd) {
     return;
   }
 
-  if (cmd == "FORWARD" || cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
+  // IMPORTANT FIX:
+  // Plain FORWARD from luna/robot/cmd is treated as FACE command only when Face mode is active.
+  // In Manual mode it is ignored, so face detection cannot push robot forward.
+  if (cmd == "FORWARD") {
+    handleFaceCommand(cmd);
+    return;
+  }
+
+  if (cmd == "STOP") {
+    if (controlMode == 1) handleFaceCommand(cmd);
+    else handleManualCommand(cmd);
+    return;
+  }
+
+  if (cmd == "LEFT" || cmd == "RIGHT" || cmd == "BACKWARD") {
     handleManualCommand(cmd);
     return;
   }
@@ -690,7 +697,7 @@ void reconnectMqtt() {
     mqttClient.subscribe(TOPIC_ROBOT_MANUAL);
     mqttClient.subscribe(TOPIC_ROBOT_FACE);
 
-    publishStatus("MQTT CONNECTED - READY - MANUAL MODE");
+    publishStatus("MQTT CONNECTED - READY");
     publishEmotion("HAPPY");
   } else {
     Serial.print("failed rc=");
@@ -1096,7 +1103,9 @@ void loop() {
 
   if (controlMode == 2) {
     noTone(BUZZER_PIN);
-    piCommand = "STOP";   // safety: manual mode never uses face FORWARD
+    piCommand = "STOP";       // Manual mode NEVER uses face FORWARD
+    lastPiCommandTime = 0;
+    faceStatus = "FACE IGNORED - MANUAL MODE";
     runCommand(manualCommand, "MANUAL");
     return;
   }
